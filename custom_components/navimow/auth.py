@@ -1,156 +1,154 @@
-"""Authentication handler for the Navimow API.
+"""Authentication handler for the Navimow integration.
 
-Uses OAuth2 Authorization Code Flow with an external browser login step.
-The SDK expects a pre-obtained Bearer token - no HMAC signing is needed
-for the openapi endpoints.
+Uses the same OAuth2 flow as the official NavimowHA integration:
+- LocalOAuth2Implementation for the authorize/token exchange
+- OAuth2Session for automatic token refresh
+- NavimowAuth wrapper for API client usage
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-import aiohttp
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.helpers.config_entry_oauth2_flow import LocalOAuth2Implementation
 
-from .const import API_BASE_URLS, PASSPORT_BASE_URL
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+from .const import OAUTH2_AUTHORIZE, OAUTH2_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class NavimowAuthError(Exception):
-    """Raised when authentication fails."""
+class NavimowOAuth2Implementation(LocalOAuth2Implementation):
+    """OAuth2 implementation for Navimow, matching the official integration."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        domain: str,
+        client_id: str,
+        client_secret: str,
+    ) -> None:
+        """Initialize the OAuth2 implementation.
+
+        Args:
+            hass: Home Assistant instance.
+            domain: Integration domain.
+            client_id: OAuth2 client ID.
+            client_secret: OAuth2 client secret.
+        """
+        super().__init__(
+            hass=hass,
+            domain=domain,
+            client_id=client_id,
+            client_secret=client_secret,
+            authorize_url=OAUTH2_AUTHORIZE,
+            token_url=OAUTH2_TOKEN,
+        )
+
+    @property
+    def name(self) -> str:
+        """Return the name of this implementation."""
+        return "Navimow"
+
+    async def async_generate_authorize_url(self, flow_id: str) -> str:
+        """Generate the authorize URL ensuring channel=homeassistant is present.
+
+        Args:
+            flow_id: The config flow ID for the callback.
+
+        Returns:
+            The full authorize URL with all required parameters.
+        """
+        url = await super().async_generate_authorize_url(flow_id)
+        # Ensure channel=homeassistant is in the URL
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query.setdefault("channel", "homeassistant")
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
+    async def _async_refresh_token(self, token: dict) -> dict:
+        """Refresh the access token.
+
+        Raises ConfigEntryAuthFailed if no refresh token is available
+        or if the token is permanently invalid.
+
+        Args:
+            token: The current token dict containing refresh_token.
+
+        Returns:
+            New token dict with refreshed access_token.
+
+        Raises:
+            ConfigEntryAuthFailed: If refresh token is missing or permanently invalid.
+        """
+        if "refresh_token" not in token:
+            raise ConfigEntryAuthFailed("No refresh token available")
+
+        try:
+            return await super()._async_refresh_token(token)
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception as err:
+            err_str = str(err).lower()
+            if any(k in err_str for k in ("401", "403", "invalid", "expired")):
+                raise ConfigEntryAuthFailed(
+                    f"Token expired or invalid: {err}"
+                ) from err
+            raise
 
 
 class NavimowAuth:
-    """Authentication handler for Navimow API.
+    """Auth wrapper that gets token from HA's OAuth2 session.
 
-    Manages Bearer token lifecycle including refresh. Auth headers follow
-    the SDK pattern: Authorization: Bearer {token} + requestId: {uuid}.
+    Provides a simple interface for the API client to get valid
+    access tokens and auth headers.
     """
 
     def __init__(
         self,
-        session: aiohttp.ClientSession,
-        region: str,
-        access_token: str,
-        refresh_token: str,
-        token_expiry: datetime,
-        on_token_refresh: Callable[[str, str, datetime], Awaitable[None]],
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        implementation: NavimowOAuth2Implementation,
     ) -> None:
-        """Initialize the auth handler.
+        """Initialize the auth wrapper.
 
         Args:
-            session: aiohttp client session for HTTP requests.
-            region: Server region code (fra, ore, sg, bj, mos).
-            access_token: Current OAuth access token.
-            refresh_token: OAuth refresh token for obtaining new access tokens.
-            token_expiry: Datetime when the current access token expires.
-            on_token_refresh: Callback invoked after successful token refresh
-                to persist the new tokens.
+            hass: Home Assistant instance.
+            config_entry: The config entry containing token data.
+            implementation: The OAuth2 implementation for token refresh.
         """
-        self._session = session
-        self._region = region
-        self._access_token = access_token
-        self._refresh_token = refresh_token
-        self._token_expiry = token_expiry
-        self._on_token_refresh = on_token_refresh
-
-    @property
-    def passport_url(self) -> str:
-        """Return regional passport URL."""
-        return PASSPORT_BASE_URL.format(region=self._region)
+        self._hass = hass
+        self._config_entry = config_entry
+        self._implementation = implementation
+        self._session = config_entry_oauth2_flow.OAuth2Session(
+            hass, config_entry, implementation
+        )
 
     async def async_get_access_token(self) -> str:
-        """Return valid access token, refreshing if needed.
-
-        If the current token is expired or about to expire (within 60s),
-        this will automatically refresh it before returning.
+        """Get a valid access token, refreshing if necessary.
 
         Returns:
             A valid access token string.
 
         Raises:
-            NavimowAuthError: If token refresh fails.
+            ConfigEntryAuthFailed: If the token cannot be refreshed.
         """
-        now = datetime.now(timezone.utc)
-        # Refresh 60 seconds before actual expiry to avoid race conditions
-        if now >= (self._token_expiry - timedelta(seconds=60)):
-            _LOGGER.debug("Access token expired or expiring soon, refreshing")
-            await self.async_refresh_token()
-        return self._access_token
-
-    async def async_refresh_token(self) -> tuple[str, str, datetime]:
-        """Refresh the access token using refresh_token grant.
-
-        Returns:
-            Tuple of (new_access_token, new_refresh_token, new_expiry).
-
-        Raises:
-            NavimowAuthError: If the refresh request fails.
-        """
-        url = f"{self.passport_url}oauth/access_token"
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": self._refresh_token,
-        }
-
-        try:
-            async with self._session.post(url, data=data) as resp:
-                if resp.status != 200:
-                    raise NavimowAuthError(
-                        f"Token refresh failed with status {resp.status}"
-                    )
-                result = await resp.json()
-        except aiohttp.ClientError as err:
-            raise NavimowAuthError(
-                f"Token refresh request failed: {err}"
-            ) from err
-
-        if "access_token" not in result:
-            raise NavimowAuthError("Token refresh response missing access_token")
-
-        self._access_token = result["access_token"]
-        self._refresh_token = result.get("refresh_token", self._refresh_token)
-
-        expires_in = int(result.get("expires_in", 3600))
-        self._token_expiry = datetime.now(timezone.utc).replace(
-            microsecond=0
-        ) + timedelta(seconds=expires_in)
-
-        _LOGGER.debug("Token refreshed successfully, expires in %d seconds", expires_in)
-
-        await self._on_token_refresh(
-            self._access_token, self._refresh_token, self._token_expiry
-        )
-
-        return self._access_token, self._refresh_token, self._token_expiry
+        await self._session.async_ensure_token_valid()
+        return self._session.token["access_token"]
 
     def get_auth_headers(self) -> dict[str, str]:
-        """Get auth headers matching the SDK pattern.
+        """Get auth headers for API requests.
 
         Returns:
             Dictionary with Authorization Bearer header and a unique requestId.
         """
+        token = self._config_entry.data.get("token", {})
         return {
-            "Authorization": f"Bearer {self._access_token}",
+            "Authorization": f"Bearer {token.get('access_token', '')}",
             "requestId": str(uuid.uuid4()),
         }
-
-    def sign_request(self, params: dict[str, str] | None = None) -> dict[str, str]:
-        """Get request headers for API calls.
-
-        The openapi endpoints use simple Bearer token auth (matching the SDK).
-        This method replaces the old NbEncryption-based signing.
-
-        Args:
-            params: Unused, kept for backward compatibility with coordinator.
-
-        Returns:
-            Dictionary of HTTP headers with Bearer auth and requestId.
-        """
-        return self.get_auth_headers()

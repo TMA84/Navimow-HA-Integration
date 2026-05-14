@@ -21,17 +21,11 @@ POLL_INTERVAL_ACTIVE = 10
 POLL_INTERVAL_DEFAULT = 30
 POLL_INTERVAL_IDLE = 60
 
-# Supported regions
-REGIONS = ["fra", "ore", "sg", "bj", "mos"]
-
-# OAuth2 login page URLs per region (browser-based authorization)
-OAUTH_LOGIN_URLS = {
-    "fra": "https://navimow-h5-fra-willand.com/smartHome/login",
-    "ore": "https://navimow-h5-ore-willand.com/smartHome/login",
-    "sg": "https://navimow-h5-sg-willand.com/smartHome/login",
-    "bj": "https://navimow-h5-bj-willand.com/smartHome/login",
-    "mos": "https://navimow-h5-mos-willand.com/smartHome/login",
-}
+# OAuth2 Configuration (matching official NavimowHA integration)
+OAUTH2_AUTHORIZE = "https://navimow-h5-fra.willand.com/smartHome/login?channel=homeassistant"
+OAUTH2_TOKEN = "https://navimow-fra.ninebot.com/openapi/oauth/getAccessToken"
+CLIENT_ID = "homeassistant"
+CLIENT_SECRET = "57056e15-722e-42be-bbaa-b0cbfb208a52"
 
 # API base URLs per region (confirmed from SDK)
 API_BASE_URLS = {
@@ -42,9 +36,8 @@ API_BASE_URLS = {
     "mos": "https://navimow-mos.ninebot.com",
 }
 
-# Legacy URL templates (kept for backward compatibility during migration)
-API_BASE_URL = "https://navimow-{region}.ninebot.com/"
-PASSPORT_BASE_URL = "https://api-passport-{region}.ninebot.com/"
+# Default API base URL (fra region, matching official integration)
+API_BASE_URL = "https://navimow-fra.ninebot.com"
 
 
 class IndexType(IntEnum):

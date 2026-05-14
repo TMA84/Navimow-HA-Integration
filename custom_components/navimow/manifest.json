@@ -3,6 +3,7 @@
   "name": "Segway Navimow",
   "codeowners": ["@navimow-ha"],
   "config_flow": true,
+  "dependencies": ["http"],
   "documentation": "https://github.com/navimow-ha/navimow-home-assistant",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/navimow-ha/navimow-home-assistant/issues",

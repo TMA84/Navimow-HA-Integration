@@ -94,7 +94,7 @@ class NavimowApiClient:
         url = f"{self.base_url}{endpoint}"
 
         for attempt in range(1, self.MAX_RETRIES + 1):
-            # Get a valid token (refreshes if expired)
+            # Ensure token is valid (refreshes via OAuth2Session if expired)
             await self._auth.async_get_access_token()
 
             # Get auth headers (Bearer token + requestId)
@@ -109,12 +109,12 @@ class NavimowApiClient:
                     headers=headers,
                 ) as resp:
                     if resp.status == 401:
-                        # Token may have been invalidated server-side; refresh and retry once
+                        # Token may have been invalidated server-side
+                        # Force a new token fetch (OAuth2Session will refresh)
                         _LOGGER.debug(
-                            "Received 401 for %s, refreshing token", endpoint
+                            "Received 401 for %s, retrying with fresh token", endpoint
                         )
-                        await self._auth.async_refresh_token()
-                        # Retry with new token
+                        await self._auth.async_get_access_token()
                         headers = self._auth.get_auth_headers()
                         async with self._session.request(
                             method,

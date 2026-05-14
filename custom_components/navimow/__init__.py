@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api_client import NavimowApiClient
-from .auth import NavimowAuth
-from .const import DOMAIN, PLATFORMS
+from .auth import NavimowAuth, NavimowOAuth2Implementation
+from .const import CLIENT_ID, CLIENT_SECRET, DOMAIN, PLATFORMS
 from .coordinator import NavimowCoordinator
 
 try:
@@ -25,7 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Navimow from a config entry.
 
-    Creates the API client, auth handler, and a coordinator per device.
+    Creates the OAuth2 session, API client, and a coordinator per device.
     Forwards entity platforms and stores coordinators in hass.data.
     """
     hass.data.setdefault(DOMAIN, {})
@@ -36,63 +36,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         integration_logger = logging.getLogger("custom_components.navimow")
         integration_logger.addFilter(log_filter)
 
-    session = async_get_clientsession(hass)
-
-    # Parse token expiry from stored ISO format string
-    token_expiry_str = entry.data.get("token_expiry", "")
-    try:
-        token_expiry = datetime.fromisoformat(token_expiry_str)
-    except (ValueError, TypeError):
-        token_expiry = datetime.now(tz=timezone.utc)
-
-    region = entry.data["region"]
-
-    # Register known sensitive values with the log filter
-    access_token = entry.data["access_token"]
-    refresh_token = entry.data["refresh_token"]
-    if log_filter:
-        log_filter.add_sensitive_value(access_token)
-        log_filter.add_sensitive_value(refresh_token)
-
-    async def _on_token_refresh(
-        access_token: str, refresh_token: str, expiry: datetime
-    ) -> None:
-        """Persist refreshed tokens to the config entry."""
-        # Update log filter with new token values
-        if log_filter:
-            log_filter.add_sensitive_value(access_token)
-            log_filter.add_sensitive_value(refresh_token)
-
-        hass.config_entries.async_update_entry(
-            entry,
-            data={
-                **entry.data,
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "token_expiry": expiry.isoformat(),
-            },
-        )
-
-    auth = NavimowAuth(
-        session=session,
-        region=region,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_expiry=token_expiry,
-        on_token_refresh=_on_token_refresh,
+    # Set up OAuth2 implementation and session
+    implementation = NavimowOAuth2Implementation(
+        hass, DOMAIN, CLIENT_ID, CLIENT_SECRET
+    )
+    config_entry_oauth2_flow.async_register_implementation(
+        hass, DOMAIN, implementation
     )
 
+    # Create the auth wrapper that manages token refresh via OAuth2Session
+    auth = NavimowAuth(hass, entry, implementation)
+
+    # Register sensitive values with the log filter
+    token_data = entry.data.get("token", {})
+    if log_filter and token_data:
+        if token_data.get("access_token"):
+            log_filter.add_sensitive_value(token_data["access_token"])
+        if token_data.get("refresh_token"):
+            log_filter.add_sensitive_value(token_data["refresh_token"])
+
+    session = async_get_clientsession(hass)
     api_client = NavimowApiClient(
         session=session,
         auth=auth,
-        region=region,
+        region="fra",
     )
 
-    # Create a coordinator per selected device
-    devices: list[str] = entry.data.get("devices", [])
+    # Discover devices on first refresh (matching official integration pattern)
+    # First, get the list of devices from the API
+    devices = await api_client.get_devices()
+    device_sns = [
+        d.get("id", d.get("sn", d.get("device_sn", "")))
+        for d in devices
+        if d.get("id") or d.get("sn") or d.get("device_sn")
+    ]
+
+    if not device_sns:
+        _LOGGER.warning("No Navimow devices found on this account")
+
+    # Create a coordinator per discovered device
     coordinators: dict[str, NavimowCoordinator] = {}
 
-    for device_sn in devices:
+    for device_sn in device_sns:
         coordinator = NavimowCoordinator(
             hass=hass,
             config_entry=entry,

@@ -1,49 +1,28 @@
 {
   "config": {
     "step": {
-      "user": {
-        "title": "Connect to Navimow",
-        "description": "Select your Navimow server region. You will be redirected to the Navimow login page in your browser.",
-        "data": {
-          "region": "Server Region"
-        }
-      },
-      "auth": {
-        "title": "Authenticate with Navimow",
-        "description": "Please log in to your Segway/Ninebot account in the browser window that opened."
-      },
-      "devices": {
-        "title": "Select Devices",
-        "description": "Select the Navimow mowers to add",
-        "data": {
-          "devices": "Devices"
-        }
+      "pick_implementation": {
+        "title": "Connect to Navimow"
       },
       "reauth_confirm": {
-        "title": "Re-authenticate",
-        "description": "Your session has expired. Confirm your region to re-authenticate via browser.",
-        "data": {
-          "region": "Server Region"
-        }
-      },
-      "reauth_auth": {
         "title": "Re-authenticate with Navimow",
-        "description": "Please log in to your Segway/Ninebot account in the browser window that opened."
+        "description": "Your session has expired. Please re-authenticate to continue using your Navimow mowers."
       }
     },
-    "error": {
-      "invalid_auth": "Authentication failed. Please try again.",
-      "cannot_connect": "Unable to connect to the Navimow service",
-      "no_devices": "No Navimow devices found on this account",
-      "unknown": "An unexpected error occurred"
-    },
     "abort": {
-      "reauth_successful": "Re-authentication successful",
       "already_configured": "This account is already configured",
-      "invalid_auth": "Authentication failed. Please try again.",
-      "unknown": "An unexpected error occurred",
-      "cannot_connect": "Unable to connect to the Navimow service",
-      "no_devices": "No Navimow devices found on this account"
+      "reauth_successful": "Re-authentication successful",
+      "authorize_url_timeout": "Timeout generating authorize URL",
+      "missing_configuration": "The integration is not configured. Please follow the documentation.",
+      "no_url_available": "No URL available. For information about this error, check the help section.",
+      "user_rejected_authorize": "Account linking rejected: {error}",
+      "oauth_error": "Received invalid token data: {error}",
+      "oauth_failed": "Error while obtaining access token: {error}",
+      "oauth_timeout": "Timeout resolving OAuth token",
+      "oauth_unauthorized": "OAuth authorization error on token request: {error}"
+    },
+    "create_entry": {
+      "default": "Successfully authenticated with Navimow"
     }
   }
 }
