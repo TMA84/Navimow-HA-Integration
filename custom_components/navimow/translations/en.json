@@ -3,12 +3,14 @@
     "step": {
       "user": {
         "title": "Connect to Navimow",
-        "description": "Enter your Segway/Ninebot account credentials",
+        "description": "Select your Navimow server region. You will be redirected to the Navimow login page in your browser.",
         "data": {
-          "username": "Email or Phone",
-          "password": "Password",
           "region": "Server Region"
         }
+      },
+      "auth": {
+        "title": "Authenticate with Navimow",
+        "description": "Please log in to your Segway/Ninebot account in the browser window that opened."
       },
       "devices": {
         "title": "Select Devices",
@@ -19,23 +21,29 @@
       },
       "reauth_confirm": {
         "title": "Re-authenticate",
-        "description": "Your session has expired. Please re-enter your credentials.",
+        "description": "Your session has expired. Confirm your region to re-authenticate via browser.",
         "data": {
-          "username": "Email or Phone",
-          "password": "Password",
           "region": "Server Region"
         }
+      },
+      "reauth_auth": {
+        "title": "Re-authenticate with Navimow",
+        "description": "Please log in to your Segway/Ninebot account in the browser window that opened."
       }
     },
     "error": {
-      "invalid_auth": "Invalid credentials",
+      "invalid_auth": "Authentication failed. Please try again.",
       "cannot_connect": "Unable to connect to the Navimow service",
       "no_devices": "No Navimow devices found on this account",
       "unknown": "An unexpected error occurred"
     },
     "abort": {
       "reauth_successful": "Re-authentication successful",
-      "already_configured": "This account is already configured"
+      "already_configured": "This account is already configured",
+      "invalid_auth": "Authentication failed. Please try again.",
+      "unknown": "An unexpected error occurred",
+      "cannot_connect": "Unable to connect to the Navimow service",
+      "no_devices": "No Navimow devices found on this account"
     }
   }
 }

@@ -1,4 +1,9 @@
-"""API client for the Navimow cloud platform."""
+"""API client for the Navimow cloud platform.
+
+Uses the openapi/smarthome endpoints matching the navimow-sdk pattern.
+Auth is simple Bearer token + requestId header (no HMAC signing needed).
+Response format uses code=1 for success.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from typing import Any
 import aiohttp
 
 from .auth import NavimowAuth
-from .const import API_BASE_URL
+from .const import API_BASE_URLS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +34,11 @@ class NavimowApiError(Exception):
 
 
 class NavimowApiClient:
-    """Client for the Navimow cloud API."""
+    """Client for the Navimow cloud API.
+
+    Uses the openapi/smarthome endpoints with Bearer token auth,
+    matching the navimow-sdk implementation.
+    """
 
     MAX_RETRIES = 3
     DEFAULT_RETRY_AFTER = 60
@@ -44,7 +53,7 @@ class NavimowApiClient:
 
         Args:
             session: aiohttp client session for HTTP requests.
-            auth: Authentication handler for token management and signing.
+            auth: Authentication handler for token management.
             region: Server region code (fra, ore, sg, bj, mos).
         """
         self._session = session
@@ -54,7 +63,7 @@ class NavimowApiClient:
     @property
     def base_url(self) -> str:
         """Return regional API base URL."""
-        return API_BASE_URL.format(region=self._region)
+        return API_BASE_URLS.get(self._region, API_BASE_URLS["fra"])
 
     async def _request(
         self,
@@ -72,7 +81,7 @@ class NavimowApiClient:
 
         Args:
             method: HTTP method (GET or POST).
-            endpoint: API endpoint path (relative to base_url).
+            endpoint: API endpoint path (relative, starting with /).
             params: Query parameters for the request.
             data: JSON body data for POST requests.
 
@@ -83,20 +92,19 @@ class NavimowApiClient:
             NavimowApiError: If the request fails after all retries.
         """
         url = f"{self.base_url}{endpoint}"
-        request_params = params or {}
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             # Get a valid token (refreshes if expired)
             await self._auth.async_get_access_token()
 
-            # Sign the request parameters
-            headers = self._auth.sign_request(request_params)
+            # Get auth headers (Bearer token + requestId)
+            headers = self._auth.get_auth_headers()
 
             try:
                 async with self._session.request(
                     method,
                     url,
-                    params=request_params if method == "GET" else None,
+                    params=params if method == "GET" else None,
                     json=data if method == "POST" else None,
                     headers=headers,
                 ) as resp:
@@ -107,11 +115,11 @@ class NavimowApiClient:
                         )
                         await self._auth.async_refresh_token()
                         # Retry with new token
-                        headers = self._auth.sign_request(request_params)
+                        headers = self._auth.get_auth_headers()
                         async with self._session.request(
                             method,
                             url,
-                            params=request_params if method == "GET" else None,
+                            params=params if method == "GET" else None,
                             json=data if method == "POST" else None,
                             headers=headers,
                         ) as retry_resp:
@@ -189,7 +197,7 @@ class NavimowApiClient:
         """Make an authenticated GET request.
 
         Args:
-            endpoint: API endpoint path.
+            endpoint: API endpoint path (starting with /).
             params: Query parameters.
 
         Returns:
@@ -203,7 +211,7 @@ class NavimowApiClient:
         """Make an authenticated POST request.
 
         Args:
-            endpoint: API endpoint path.
+            endpoint: API endpoint path (starting with /).
             data: JSON body data.
 
         Returns:
@@ -211,19 +219,151 @@ class NavimowApiClient:
         """
         return await self._request("POST", endpoint, data=data)
 
-    # ─── Device Endpoints ───────────────────────────────────────────────
+    # ─── Smart Home API Endpoints (from SDK) ────────────────────────────
 
     async def get_devices(self) -> list[dict[str, Any]]:
         """Get list of devices bound to the account.
 
+        Uses /openapi/smarthome/authList endpoint.
+
         Returns:
             List of device dictionaries from the API.
         """
-        result = await self._get("vehicle/vehicle/index")
-        return result.get("data", [])
+        result = await self._get("/openapi/smarthome/authList")
+        if result.get("code") != 1:
+            _LOGGER.error(
+                "Device list request failed: %s", result.get("desc", "unknown")
+            )
+            return []
+        payload = result.get("data", {}).get("payload", {})
+        return payload.get("devices", [])
+
+    async def get_device_status(self, device_id: str) -> dict[str, Any]:
+        """Get status for a single device.
+
+        Uses /openapi/smarthome/getVehicleStatus endpoint.
+
+        Args:
+            device_id: Device identifier.
+
+        Returns:
+            Device status dictionary.
+        """
+        result = await self._post(
+            "/openapi/smarthome/getVehicleStatus",
+            data={"devices": [{"id": device_id}]},
+        )
+        if result.get("code") != 1:
+            _LOGGER.error(
+                "Device status request failed: %s", result.get("desc", "unknown")
+            )
+            return {}
+        payload = result.get("data", {}).get("payload", {})
+        devices = payload.get("devices", [])
+        if devices:
+            return devices[0]
+        return {}
+
+    async def get_device_statuses(
+        self, device_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Get status for multiple devices.
+
+        Uses /openapi/smarthome/getVehicleStatus endpoint.
+
+        Args:
+            device_ids: List of device identifiers.
+
+        Returns:
+            Mapping of device_id to status dictionary.
+        """
+        if not device_ids:
+            return {}
+        result = await self._post(
+            "/openapi/smarthome/getVehicleStatus",
+            data={"devices": [{"id": did} for did in device_ids]},
+        )
+        if result.get("code") != 1:
+            _LOGGER.error(
+                "Device statuses request failed: %s", result.get("desc", "unknown")
+            )
+            return {}
+        payload = result.get("data", {}).get("payload", {})
+        devices = payload.get("devices", [])
+        return {d.get("id", ""): d for d in devices if d.get("id")}
+
+    async def send_command(
+        self, device_sn: str, command: str, params: dict[str, Any] | None = None
+    ) -> bool:
+        """Send a command to the device.
+
+        Uses /openapi/smarthome/sendCommands endpoint.
+
+        Args:
+            device_sn: Device serial number / identifier.
+            command: Command name (e.g., "action.devices.commands.StartStop").
+            params: Optional command parameters.
+
+        Returns:
+            True if the command was accepted.
+
+        Raises:
+            NavimowApiError: If the command fails.
+        """
+        execution: dict[str, Any] = {"command": command}
+        if params:
+            execution["params"] = params
+
+        result = await self._post(
+            "/openapi/smarthome/sendCommands",
+            data={
+                "commands": [
+                    {"devices": [{"id": device_sn}], "execution": execution}
+                ]
+            },
+        )
+        if result.get("code") != 1:
+            raise NavimowApiError(
+                f"Command failed: {result.get('desc', 'unknown error')}"
+            )
+
+        # Check individual command results
+        payload = result.get("data", {}).get("payload", {})
+        command_results = payload.get("commands", [])
+        for cmd_result in command_results:
+            if cmd_result.get("status") == "ERROR":
+                error_code = cmd_result.get("errorCode") or "COMMAND_FAILED"
+                # Device already in target state is treated as success
+                if error_code == "alreadyInState":
+                    continue
+                raise NavimowApiError(
+                    f"Command failed with error: {error_code}"
+                )
+        return True
+
+    async def get_mqtt_info(self) -> dict[str, Any]:
+        """Get MQTT connection information.
+
+        Uses /openapi/mqtt/userInfo/get/v2 endpoint.
+
+        Returns:
+            MQTT connection info dictionary.
+        """
+        result = await self._get("/openapi/mqtt/userInfo/get/v2")
+        if result.get("code") != 1:
+            _LOGGER.error(
+                "MQTT info request failed: %s", result.get("desc", "unknown")
+            )
+            return {}
+        return result.get("data", {})
+
+    # ─── Legacy Endpoints (kept for coordinator compatibility) ──────────
 
     async def get_device_info(self, device_sn: str) -> dict[str, Any]:
         """Get static device information.
+
+        Falls back to the smart home device status if the legacy endpoint
+        is not available.
 
         Args:
             device_sn: Device serial number.
@@ -231,10 +371,9 @@ class NavimowApiClient:
         Returns:
             Device info dictionary.
         """
-        result = await self._get(
-            "vehicle/vehicle/get-device-info", params={"sn": device_sn}
-        )
-        return result.get("data", {})
+        # Try the smart home status endpoint which includes device info
+        status = await self.get_device_status(device_sn)
+        return status.get("deviceInfo", status)
 
     async def get_device_data(self, device_sn: str) -> dict[str, Any]:
         """Get real-time telemetry data for a device.
@@ -245,10 +384,8 @@ class NavimowApiClient:
         Returns:
             Telemetry data dictionary.
         """
-        result = await self._get(
-            "vehicle/vehicle/get-data", params={"sn": device_sn}
-        )
-        return result.get("data", {})
+        status = await self.get_device_status(device_sn)
+        return status.get("states", status)
 
     async def get_today_plan(self, device_sn: str) -> dict[str, Any]:
         """Get today's mowing schedule for a device.
@@ -259,10 +396,8 @@ class NavimowApiClient:
         Returns:
             Schedule data dictionary.
         """
-        result = await self._get(
-            "vehicle/vehicle/get-today-plan", params={"sn": device_sn}
-        )
-        return result.get("data", {})
+        status = await self.get_device_status(device_sn)
+        return status.get("schedule", {})
 
     async def get_settings_status(self, device_sn: str) -> dict[str, Any]:
         """Get current device settings.
@@ -273,10 +408,8 @@ class NavimowApiClient:
         Returns:
             Settings data dictionary.
         """
-        result = await self._get(
-            "vehicle/set/status", params={"sn": device_sn}
-        )
-        return result.get("data", {})
+        status = await self.get_device_status(device_sn)
+        return status.get("settings", {})
 
     async def get_location(self, device_sn: str) -> dict[str, Any]:
         """Get GPS location data for a device.
@@ -287,38 +420,8 @@ class NavimowApiClient:
         Returns:
             Location data dictionary.
         """
-        result = await self._get(
-            "vehicle/vehicle/get-location", params={"sn": device_sn}
-        )
-        return result.get("data", {})
-
-    async def get_trail_list(self, device_sn: str) -> list[dict[str, Any]]:
-        """Get mowing trail history list.
-
-        Args:
-            device_sn: Device serial number.
-
-        Returns:
-            List of trail entry dictionaries.
-        """
-        result = await self._get(
-            "vehicle/map/trail-list", params={"sn": device_sn}
-        )
-        return result.get("data", [])
-
-    async def get_trail_detail(self, trail_id: str) -> dict[str, Any]:
-        """Get detailed trail data for a specific trail.
-
-        Args:
-            trail_id: Trail identifier.
-
-        Returns:
-            Trail detail dictionary.
-        """
-        result = await self._get(
-            "vehicle/map/trail-detail", params={"id": trail_id}
-        )
-        return result.get("data", {})
+        status = await self.get_device_status(device_sn)
+        return status.get("location", {})
 
     async def get_errors(self, device_sn: str) -> list[dict[str, Any]]:
         """Get active errors for a device.
@@ -329,10 +432,8 @@ class NavimowApiClient:
         Returns:
             List of error info dictionaries.
         """
-        result = await self._get(
-            "vehicle/vehicle/get-hint-error", params={"sn": device_sn}
-        )
-        return result.get("data", [])
+        status = await self.get_device_status(device_sn)
+        return status.get("errors", [])
 
     async def get_firmware_info(self, device_sn: str) -> dict[str, Any]:
         """Get firmware update information for a device.
@@ -343,53 +444,25 @@ class NavimowApiClient:
         Returns:
             Firmware info dictionary.
         """
-        result = await self._get(
-            "vehicle/firmware/get-new-firmware", params={"sn": device_sn}
-        )
-        return result.get("data", {})
+        status = await self.get_device_status(device_sn)
+        return status.get("firmware", {})
 
-    async def get_bms_detail(self, device_sn: str) -> dict[str, Any]:
-        """Get battery management system details.
+    async def get_trail_list(self, device_sn: str) -> list[dict[str, Any]]:
+        """Get mowing trail history list.
 
         Args:
             device_sn: Device serial number.
 
         Returns:
-            BMS detail dictionary.
+            List of trail entry dictionaries.
         """
-        result = await self._get(
-            "vehicle/vehicle/bms-detail", params={"sn": device_sn}
-        )
-        return result.get("data", {})
-
-    # ─── Command Endpoints ──────────────────────────────────────────────
-
-    async def send_command(
-        self, device_sn: str, command: str, params: dict[str, Any] | None = None
-    ) -> bool:
-        """Send a command to the device.
-
-        Args:
-            device_sn: Device serial number.
-            command: Command identifier (e.g., MOWER_HANDLE_MOW).
-            params: Optional command parameters.
-
-        Returns:
-            True if the command was accepted.
-
-        Raises:
-            NavimowApiError: If the command fails.
-        """
-        payload: dict[str, Any] = {"sn": device_sn, "command": command}
-        if params:
-            payload["params"] = params
-        result = await self._post("vehicle/vehicle/command", data=payload)
-        return result.get("code", -1) == 0
+        status = await self.get_device_status(device_sn)
+        return status.get("trails", [])
 
     async def set_setting(
         self, device_sn: str, key: str, value: Any
     ) -> bool:
-        """Update a device setting.
+        """Update a device setting via command.
 
         Args:
             device_sn: Device serial number.
@@ -402,9 +475,11 @@ class NavimowApiClient:
         Raises:
             NavimowApiError: If the setting update fails.
         """
-        payload: dict[str, Any] = {"sn": device_sn, "key": key, "value": value}
-        result = await self._post("vehicle/set/set", data=payload)
-        return result.get("code", -1) == 0
+        return await self.send_command(
+            device_sn,
+            "action.devices.commands.SetSetting",
+            params={"key": key, "value": value},
+        )
 
     async def set_power(self, device_sn: str, action: str) -> bool:
         """Control device power state.
@@ -419,6 +494,6 @@ class NavimowApiClient:
         Raises:
             NavimowApiError: If the power action fails.
         """
-        payload: dict[str, Any] = {"sn": device_sn, "action": action}
-        result = await self._post("vehicle/set/set-power", data=payload)
-        return result.get("code", -1) == 0
+        command = "action.devices.commands.StartStop"
+        params = {"on": action == "on"}
+        return await self.send_command(device_sn, command, params=params)

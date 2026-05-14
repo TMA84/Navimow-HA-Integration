@@ -24,7 +24,25 @@ POLL_INTERVAL_IDLE = 60
 # Supported regions
 REGIONS = ["fra", "ore", "sg", "bj", "mos"]
 
-# API URL templates
+# OAuth2 login page URLs per region (browser-based authorization)
+OAUTH_LOGIN_URLS = {
+    "fra": "https://navimow-h5-fra-willand.com/smartHome/login",
+    "ore": "https://navimow-h5-ore-willand.com/smartHome/login",
+    "sg": "https://navimow-h5-sg-willand.com/smartHome/login",
+    "bj": "https://navimow-h5-bj-willand.com/smartHome/login",
+    "mos": "https://navimow-h5-mos-willand.com/smartHome/login",
+}
+
+# API base URLs per region (confirmed from SDK)
+API_BASE_URLS = {
+    "fra": "https://navimow-fra.ninebot.com",
+    "ore": "https://navimow-ore.ninebot.com",
+    "sg": "https://navimow-sg.ninebot.com",
+    "bj": "https://navimow-bj.ninebot.com",
+    "mos": "https://navimow-mos.ninebot.com",
+}
+
+# Legacy URL templates (kept for backward compatibility during migration)
 API_BASE_URL = "https://navimow-{region}.ninebot.com/"
 PASSPORT_BASE_URL = "https://api-passport-{region}.ninebot.com/"
 

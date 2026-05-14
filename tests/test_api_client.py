@@ -1,4 +1,12 @@
-"""Tests for the Navimow API client."""
+"""Tests for the Navimow API client.
+
+Tests the new SDK-style API client that uses:
+- /openapi/smarthome/authList for device listing
+- /openapi/smarthome/getVehicleStatus for device status
+- /openapi/smarthome/sendCommands for commands
+- Bearer token + requestId auth headers
+- code=1 for success responses
+"""
 
 from __future__ import annotations
 
@@ -22,7 +30,7 @@ sys.modules.setdefault("homeassistant.config_entries", _ha_mock.config_entries)
 sys.modules.setdefault("homeassistant.core", _ha_mock.core)
 
 from custom_components.navimow.api_client import NavimowApiClient, NavimowApiError
-from custom_components.navimow.const import API_BASE_URL, REGIONS
+from custom_components.navimow.const import API_BASE_URLS, REGIONS
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +53,7 @@ def make_response(status: int = 200, json_data: dict | None = None, headers: dic
     response = AsyncMock()
     response.status = status
     response.headers = headers or {"Content-Type": "application/json"}
-    response.json = AsyncMock(return_value=json_data or {"code": 0, "data": {}})
+    response.json = AsyncMock(return_value=json_data or {"code": 1, "data": {}})
     response.raise_for_status = MagicMock()
     response.__aenter__ = AsyncMock(return_value=response)
     response.__aexit__ = AsyncMock(return_value=False)
@@ -64,135 +72,118 @@ class TestBaseUrl:
     def test_base_url_for_all_regions(self, mock_session, mock_auth, region):
         """Test that base_url is correctly constructed for all valid regions."""
         client = NavimowApiClient(session=mock_session, auth=mock_auth, region=region)
-        expected = f"https://navimow-{region}.ninebot.com/"
+        expected = f"https://navimow-{region}.ninebot.com"
         assert client.base_url == expected
 
     def test_base_url_format(self, api_client):
-        """Test that base_url ends with a slash and uses https."""
+        """Test that base_url uses https and contains the region."""
         assert api_client.base_url.startswith("https://")
-        assert api_client.base_url.endswith("/")
         assert "fra" in api_client.base_url
+        assert "ninebot.com" in api_client.base_url
 
 
 # ---------------------------------------------------------------------------
-# GET Endpoint Tests
+# Smart Home API Endpoint Tests
 # ---------------------------------------------------------------------------
 
 
-class TestGetEndpoints:
-    """Tests for GET API endpoints."""
+class TestSmartHomeEndpoints:
+    """Tests for the openapi/smarthome endpoints (matching SDK)."""
 
     @pytest.mark.asyncio
     async def test_get_devices(self, api_client, mock_session):
-        """Test get_devices returns list of devices."""
+        """Test get_devices returns list of devices from authList endpoint."""
         devices_data = [
-            {"device_sn": "NVM123", "name": "Mower 1", "model": "i105", "online": True}
+            {"id": "NVM123", "name": "Mower 1", "model": "i105", "isOnline": True}
         ]
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": devices_data})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": devices_data}},
+            })
         )
         result = await api_client.get_devices()
         assert result == devices_data
 
     @pytest.mark.asyncio
-    async def test_get_device_info(self, api_client, mock_session):
-        """Test get_device_info returns device info dict."""
-        info_data = {"device_sn": "NVM123", "model": "i105", "name": "Mower"}
+    async def test_get_devices_empty(self, api_client, mock_session):
+        """Test get_devices with no devices."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": info_data})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": []}},
+            })
         )
-        result = await api_client.get_device_info("NVM123")
-        assert result == info_data
+        result = await api_client.get_devices()
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_get_device_data(self, api_client, mock_session):
-        """Test get_device_data returns telemetry dict."""
-        telemetry = {"battery_level": 80, "state": "mowing"}
+    async def test_get_devices_api_error(self, api_client, mock_session):
+        """Test get_devices returns empty list on API error code."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": telemetry})
+            return_value=make_response(json_data={
+                "code": 0,
+                "desc": "unauthorized",
+            })
         )
-        result = await api_client.get_device_data("NVM123")
-        assert result == telemetry
+        result = await api_client.get_devices()
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_get_today_plan(self, api_client, mock_session):
-        """Test get_today_plan returns schedule dict."""
-        schedule = {"schedule_enabled": True, "next_start": "2024-01-01T08:00:00Z"}
+    async def test_get_device_status(self, api_client, mock_session):
+        """Test get_device_status returns status for a single device."""
+        status_data = {"id": "NVM123", "states": {"battery": 80}}
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": schedule})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": [status_data]}},
+            })
         )
-        result = await api_client.get_today_plan("NVM123")
-        assert result == schedule
+        result = await api_client.get_device_status("NVM123")
+        assert result == status_data
 
     @pytest.mark.asyncio
-    async def test_get_settings_status(self, api_client, mock_session):
-        """Test get_settings_status returns settings dict."""
-        settings = {"cutting_height": 40, "rain_sensor": True}
+    async def test_get_device_status_empty(self, api_client, mock_session):
+        """Test get_device_status returns empty dict when device not found."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": settings})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": []}},
+            })
         )
-        result = await api_client.get_settings_status("NVM123")
-        assert result == settings
+        result = await api_client.get_device_status("NVM_UNKNOWN")
+        assert result == {}
 
     @pytest.mark.asyncio
-    async def test_get_location(self, api_client, mock_session):
-        """Test get_location returns location dict."""
-        location = {"latitude": 51.5, "longitude": -0.1, "data_valid": True}
+    async def test_get_device_statuses(self, api_client, mock_session):
+        """Test get_device_statuses returns mapping of device statuses."""
+        devices = [
+            {"id": "NVM1", "states": {"battery": 80}},
+            {"id": "NVM2", "states": {"battery": 60}},
+        ]
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": location})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": devices}},
+            })
         )
-        result = await api_client.get_location("NVM123")
-        assert result == location
+        result = await api_client.get_device_statuses(["NVM1", "NVM2"])
+        assert "NVM1" in result
+        assert "NVM2" in result
+        assert result["NVM1"]["states"]["battery"] == 80
 
     @pytest.mark.asyncio
-    async def test_get_trail_list(self, api_client, mock_session):
-        """Test get_trail_list returns list of trails."""
-        trails = [{"trail_id": "t1", "area": 100.0}]
+    async def test_get_mqtt_info(self, api_client, mock_session):
+        """Test get_mqtt_info returns MQTT connection data."""
+        mqtt_data = {"mqttHost": "mqtt.example.com", "userName": "user1"}
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": trails})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": mqtt_data,
+            })
         )
-        result = await api_client.get_trail_list("NVM123")
-        assert result == trails
-
-    @pytest.mark.asyncio
-    async def test_get_trail_detail(self, api_client, mock_session):
-        """Test get_trail_detail returns trail detail dict."""
-        trail = {"trail_id": "t1", "points": []}
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": trail})
-        )
-        result = await api_client.get_trail_detail("t1")
-        assert result == trail
-
-    @pytest.mark.asyncio
-    async def test_get_errors(self, api_client, mock_session):
-        """Test get_errors returns list of errors."""
-        errors = [{"code": 15, "title": "Lifted"}]
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": errors})
-        )
-        result = await api_client.get_errors("NVM123")
-        assert result == errors
-
-    @pytest.mark.asyncio
-    async def test_get_firmware_info(self, api_client, mock_session):
-        """Test get_firmware_info returns firmware dict."""
-        firmware = {"update_available": True, "new_version": "1.3.0"}
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": firmware})
-        )
-        result = await api_client.get_firmware_info("NVM123")
-        assert result == firmware
-
-    @pytest.mark.asyncio
-    async def test_get_bms_detail(self, api_client, mock_session):
-        """Test get_bms_detail returns BMS dict."""
-        bms = {"voltage": 25.6, "cycles": 142}
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": bms})
-        )
-        result = await api_client.get_bms_detail("NVM123")
-        assert result == bms
+        result = await api_client.get_mqtt_info()
+        assert result == mqtt_data
 
 
 # ---------------------------------------------------------------------------
@@ -207,48 +198,190 @@ class TestCommandEndpoints:
     async def test_send_command_success(self, api_client, mock_session):
         """Test send_command returns True on success."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [{"status": "SUCCESS"}]}},
+            })
         )
-        result = await api_client.send_command("NVM123", "MOWER_HANDLE_MOW")
+        result = await api_client.send_command(
+            "NVM123", "action.devices.commands.StartStop", params={"on": True}
+        )
         assert result is True
 
     @pytest.mark.asyncio
     async def test_send_command_with_params(self, api_client, mock_session):
         """Test send_command passes params correctly."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [{"status": "SUCCESS"}]}},
+            })
         )
         result = await api_client.send_command(
-            "NVM123", "MOWER_HANDLE_MOW", params={"zone": "zone_1"}
+            "NVM123", "action.devices.commands.Dock", params=None
         )
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_send_command_failure(self, api_client, mock_session):
-        """Test send_command returns False on API error code."""
+    async def test_send_command_api_error_raises(self, api_client, mock_session):
+        """Test send_command raises NavimowApiError on API error code."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": -1, "message": "Invalid state"})
+            return_value=make_response(json_data={
+                "code": 0,
+                "desc": "device offline",
+            })
         )
-        result = await api_client.send_command("NVM123", "MOWER_HANDLE_MOW")
-        assert result is False
+        with pytest.raises(NavimowApiError, match="Command failed"):
+            await api_client.send_command(
+                "NVM123", "action.devices.commands.StartStop", params={"on": True}
+            )
+
+    @pytest.mark.asyncio
+    async def test_send_command_error_status_raises(self, api_client, mock_session):
+        """Test send_command raises on ERROR status in command results."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [
+                    {"status": "ERROR", "errorCode": "deviceOffline"}
+                ]}},
+            })
+        )
+        with pytest.raises(NavimowApiError, match="deviceOffline"):
+            await api_client.send_command(
+                "NVM123", "action.devices.commands.StartStop", params={"on": True}
+            )
+
+    @pytest.mark.asyncio
+    async def test_send_command_already_in_state_succeeds(self, api_client, mock_session):
+        """Test send_command treats alreadyInState as success."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [
+                    {"status": "ERROR", "errorCode": "alreadyInState"}
+                ]}},
+            })
+        )
+        result = await api_client.send_command(
+            "NVM123", "action.devices.commands.StartStop", params={"on": True}
+        )
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_set_setting_success(self, api_client, mock_session):
         """Test set_setting returns True on success."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [{"status": "SUCCESS"}]}},
+            })
         )
         result = await api_client.set_setting("NVM123", "cutting_height", 40)
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_set_power_success(self, api_client, mock_session):
-        """Test set_power returns True on success."""
+    async def test_set_power_on(self, api_client, mock_session):
+        """Test set_power with 'on' action."""
         mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0})
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [{"status": "SUCCESS"}]}},
+            })
         )
         result = await api_client.set_power("NVM123", "on")
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_set_power_off(self, api_client, mock_session):
+        """Test set_power with 'off' action."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"commands": [{"status": "SUCCESS"}]}},
+            })
+        )
+        result = await api_client.set_power("NVM123", "off")
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Legacy Endpoint Tests (backward compatibility)
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyEndpoints:
+    """Tests for legacy endpoints that delegate to get_device_status."""
+
+    @pytest.mark.asyncio
+    async def test_get_device_info(self, api_client, mock_session):
+        """Test get_device_info extracts deviceInfo from status."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": [
+                    {"id": "NVM123", "deviceInfo": {"model": "i105", "name": "Mower"}}
+                ]}},
+            })
+        )
+        result = await api_client.get_device_info("NVM123")
+        assert result == {"model": "i105", "name": "Mower"}
+
+    @pytest.mark.asyncio
+    async def test_get_device_data(self, api_client, mock_session):
+        """Test get_device_data extracts states from status."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": [
+                    {"id": "NVM123", "states": {"battery_level": 80, "state": "mowing"}}
+                ]}},
+            })
+        )
+        result = await api_client.get_device_data("NVM123")
+        assert result == {"battery_level": 80, "state": "mowing"}
+
+    @pytest.mark.asyncio
+    async def test_get_location(self, api_client, mock_session):
+        """Test get_location extracts location from status."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": [
+                    {"id": "NVM123", "location": {"latitude": 51.5, "longitude": -0.1}}
+                ]}},
+            })
+        )
+        result = await api_client.get_location("NVM123")
+        assert result == {"latitude": 51.5, "longitude": -0.1}
+
+    @pytest.mark.asyncio
+    async def test_get_errors(self, api_client, mock_session):
+        """Test get_errors extracts errors from status."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": [
+                    {"id": "NVM123", "errors": [{"code": 15, "title": "Lifted"}]}
+                ]}},
+            })
+        )
+        result = await api_client.get_errors("NVM123")
+        assert result == [{"code": 15, "title": "Lifted"}]
+
+    @pytest.mark.asyncio
+    async def test_get_errors_empty(self, api_client, mock_session):
+        """Test get_errors returns empty list when no errors."""
+        mock_session.request = MagicMock(
+            return_value=make_response(json_data={
+                "code": 1,
+                "data": {"payload": {"devices": [
+                    {"id": "NVM123"}
+                ]}},
+            })
+        )
+        result = await api_client.get_errors("NVM123")
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -264,13 +397,16 @@ class TestErrorHandling:
         """Test that 401 response triggers token refresh and retries."""
         # First call returns 401, second (after refresh) returns 200
         response_401 = make_response(status=401)
-        response_200 = make_response(json_data={"code": 0, "data": {"ok": True}})
+        response_200 = make_response(json_data={
+            "code": 1,
+            "data": {"payload": {"devices": [{"id": "NVM1"}]}},
+        })
 
         # The first request context returns 401, the retry returns 200
         mock_session.request = MagicMock(side_effect=[response_401, response_200])
 
-        result = await api_client.get_device_info("NVM123")
-        assert result == {"ok": True}
+        result = await api_client.get_devices()
+        assert result == [{"id": "NVM1"}]
         mock_auth.async_refresh_token.assert_called_once()
 
     @pytest.mark.asyncio
@@ -282,7 +418,7 @@ class TestErrorHandling:
         mock_session.request = MagicMock(side_effect=[response_401, response_401])
 
         with pytest.raises(NavimowApiError, match="Authentication failed"):
-            await api_client.get_device_info("NVM123")
+            await api_client.get_devices()
 
     @pytest.mark.asyncio
     async def test_429_raises_with_retry_after(self, api_client, mock_session):
@@ -330,13 +466,16 @@ class TestErrorHandling:
     async def test_5xx_succeeds_on_retry(self, api_client, mock_session):
         """Test that 5xx error followed by success returns data."""
         response_500 = make_response(status=500)
-        response_200 = make_response(json_data={"code": 0, "data": [{"sn": "NVM1"}]})
+        response_200 = make_response(json_data={
+            "code": 1,
+            "data": {"payload": {"devices": [{"id": "NVM1"}]}},
+        })
 
         mock_session.request = MagicMock(side_effect=[response_500, response_200])
 
         with patch("custom_components.navimow.api_client.asyncio.sleep", new_callable=AsyncMock):
             result = await api_client.get_devices()
-        assert result == [{"sn": "NVM1"}]
+        assert result == [{"id": "NVM1"}]
 
     @pytest.mark.asyncio
     async def test_network_error_retries(self, api_client, mock_session):
@@ -352,15 +491,18 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_network_error_succeeds_on_retry(self, api_client, mock_session):
         """Test that network error followed by success returns data."""
-        response_200 = make_response(json_data={"code": 0, "data": {"ok": True}})
+        response_200 = make_response(json_data={
+            "code": 1,
+            "data": {"payload": {"devices": [{"id": "NVM1"}]}},
+        })
 
         mock_session.request = MagicMock(
             side_effect=[aiohttp.ClientError("timeout"), response_200]
         )
 
         with patch("custom_components.navimow.api_client.asyncio.sleep", new_callable=AsyncMock):
-            result = await api_client.get_device_info("NVM123")
-        assert result == {"ok": True}
+            result = await api_client.get_devices()
+        assert result == [{"id": "NVM1"}]
 
     @pytest.mark.asyncio
     async def test_4xx_raises_immediately(self, api_client, mock_session):
@@ -373,42 +515,6 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# Edge Cases
-# ---------------------------------------------------------------------------
-
-
-class TestEdgeCases:
-    """Tests for edge cases."""
-
-    @pytest.mark.asyncio
-    async def test_empty_data_field(self, api_client, mock_session):
-        """Test handling of response with missing data field."""
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0})
-        )
-        result = await api_client.get_devices()
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_get_trail_list_empty(self, api_client, mock_session):
-        """Test get_trail_list with no trails."""
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": []})
-        )
-        result = await api_client.get_trail_list("NVM123")
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_get_errors_empty(self, api_client, mock_session):
-        """Test get_errors with no active errors."""
-        mock_session.request = MagicMock(
-            return_value=make_response(json_data={"code": 0, "data": []})
-        )
-        result = await api_client.get_errors("NVM123")
-        assert result == []
-
-
-# ---------------------------------------------------------------------------
 # Property-Based Tests (Hypothesis)
 # ---------------------------------------------------------------------------
 
@@ -416,7 +522,7 @@ from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
 from custom_components.navimow.auth import NavimowAuth
-from custom_components.navimow.const import PASSPORT_BASE_URL, REGIONS
+from custom_components.navimow.const import PASSPORT_BASE_URL
 
 
 # Feature: navimow-home-assistant, Property 1: Regional URL Construction
@@ -429,9 +535,9 @@ class TestPropertyRegionalUrlConstruction:
     @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(region=st.sampled_from(["fra", "ore", "sg", "bj", "mos"]))
     def test_api_base_url_matches_region(self, mock_session, mock_auth, region):
-        """For any valid region, the API base URL equals https://navimow-{region}.ninebot.com/."""
+        """For any valid region, the API base URL equals https://navimow-{region}.ninebot.com."""
         client = NavimowApiClient(session=mock_session, auth=mock_auth, region=region)
-        expected = f"https://navimow-{region}.ninebot.com/"
+        expected = f"https://navimow-{region}.ninebot.com"
         assert client.base_url == expected
 
     @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -451,10 +557,10 @@ class TestPropertyRegionalUrlConstruction:
 
     @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(region=st.sampled_from(["fra", "ore", "sg", "bj", "mos"]))
-    def test_api_base_url_ends_with_slash(self, mock_session, mock_auth, region):
-        """For any valid region, the API base URL ends with a trailing slash."""
+    def test_api_base_url_contains_ninebot(self, mock_session, mock_auth, region):
+        """For any valid region, the API base URL contains ninebot.com."""
         client = NavimowApiClient(session=mock_session, auth=mock_auth, region=region)
-        assert client.base_url.endswith("/")
+        assert "ninebot.com" in client.base_url
 
 
 # Feature: navimow-home-assistant, Property 10: Rate Limit Backoff Duration

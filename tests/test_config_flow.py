@@ -1,4 +1,4 @@
-"""Tests for the Navimow config flow."""
+"""Tests for the Navimow config flow (OAuth2 external browser auth)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ class _MockConfigFlow:
     def __init__(self):
         self.hass = None
         self.context = {}
+        self.flow_id = "test_flow_id_123"
 
     def async_show_form(self, **kwargs):
         return {"type": "form", **kwargs}
@@ -34,6 +35,12 @@ class _MockConfigFlow:
 
     def async_abort(self, **kwargs):
         return {"type": "abort", **kwargs}
+
+    def async_external_step(self, **kwargs):
+        return {"type": "external", **kwargs}
+
+    def async_external_step_done(self, **kwargs):
+        return {"type": "external_done", **kwargs}
 
     async def async_set_unique_id(self, unique_id):
         pass
@@ -68,6 +75,11 @@ if "homeassistant.helpers.aiohttp_client" not in sys.modules:
         "homeassistant.helpers.aiohttp_client"
     )
 
+if "homeassistant.helpers.network" not in sys.modules:
+    _ha_network = ModuleType("homeassistant.helpers.network")
+    _ha_network.get_url = MagicMock(return_value="http://homeassistant.local:8123")
+    sys.modules["homeassistant.helpers.network"] = _ha_network
+
 # Now add the attributes we need to the existing modules
 _ha_config_entries_mod = sys.modules["homeassistant.config_entries"]
 _ha_config_entries_mod.ConfigEntry = MagicMock
@@ -81,13 +93,11 @@ _ha_aiohttp_mod = sys.modules["homeassistant.helpers.aiohttp_client"]
 _ha_aiohttp_mod.async_get_clientsession = MagicMock()
 
 # Now we can import the config flow
-from custom_components.navimow.auth import NavimowAuthError
 from custom_components.navimow.config_flow import (
     REGION_LABELS,
-    STEP_USER_DATA_SCHEMA,
     NavimowConfigFlow,
 )
-from custom_components.navimow.const import DOMAIN
+from custom_components.navimow.const import DOMAIN, OAUTH_LOGIN_URLS, API_BASE_URLS
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +113,8 @@ def mock_hass():
     hass.config_entries.async_get_entry = MagicMock(return_value=None)
     hass.config_entries.async_update_entry = MagicMock()
     hass.config_entries.async_reload = AsyncMock()
+    hass.config = MagicMock()
+    hass.config.external_url = "http://homeassistant.local:8123"
     return hass
 
 
@@ -112,199 +124,186 @@ def mock_flow(mock_hass):
     flow = NavimowConfigFlow()
     flow.hass = mock_hass
     flow.context = {"entry_id": "test_entry_id"}
+    flow.flow_id = "test_flow_id_123"
     return flow
 
 
-@pytest.fixture
-def valid_user_input():
-    """Return valid user input for the user step."""
-    return {
-        "username": "user@example.com",
-        "password": "securepassword123",
-        "region": "fra",
-    }
-
-
-@pytest.fixture
-def mock_login_success():
-    """Return a mock for successful login."""
-    token_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    return ("access_token_123", "refresh_token_456", token_expiry)
-
-
 # ---------------------------------------------------------------------------
-# Tests: async_step_user
+# Tests: async_step_user (region selection)
 # ---------------------------------------------------------------------------
 
 
 class TestAsyncStepUser:
-    """Tests for the user step of the config flow."""
+    """Tests for the user step (region selection) of the config flow."""
 
     @pytest.mark.asyncio
     async def test_show_form_when_no_input(self, mock_flow):
-        """Test that the form is shown when no user input is provided."""
+        """Test that the region selection form is shown when no input."""
         result = await mock_flow.async_step_user(user_input=None)
 
         assert result["type"] == "form"
         assert result["step_id"] == "user"
-        assert result["errors"] == {}
 
     @pytest.mark.asyncio
-    async def test_successful_login_proceeds_to_devices(
-        self, mock_flow, valid_user_input, mock_login_success
-    ):
-        """Test that successful login proceeds to device selection."""
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                return_value=mock_login_success,
-            ),
-            patch.object(
-                mock_flow,
-                "_fetch_devices",
-                new_callable=AsyncMock,
-                return_value=[
-                    {
-                        "device_sn": "NVM1234567890",
-                        "name": "Front Yard Mower",
-                        "model": "Navimow i105",
-                        "online": True,
-                    }
-                ],
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_user(user_input=valid_user_input)
+    async def test_region_selection_proceeds_to_auth(self, mock_flow):
+        """Test that selecting a region proceeds to the external auth step."""
+        result = await mock_flow.async_step_user(user_input={"region": "fra"})
 
-        # Should proceed to devices step (show form for device selection)
-        assert result["type"] == "form"
-        assert result["step_id"] == "devices"
+        # Should proceed to external auth step
+        assert result["type"] == "external"
+        assert result["step_id"] == "auth"
+        assert "url" in result
+        assert mock_flow._region == "fra"
 
     @pytest.mark.asyncio
-    async def test_invalid_credentials_shows_error(
-        self, mock_flow, valid_user_input
-    ):
-        """Test that invalid credentials show an error."""
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                side_effect=NavimowAuthError("Invalid credentials"),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_user(user_input=valid_user_input)
+    async def test_region_selection_ore(self, mock_flow):
+        """Test that selecting Oregon region works."""
+        result = await mock_flow.async_step_user(user_input={"region": "ore"})
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "user"
-        assert result["errors"] == {"base": "invalid_auth"}
+        assert result["type"] == "external"
+        assert mock_flow._region == "ore"
+        # URL should contain the ore login URL
+        assert "ore" in result["url"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: async_step_auth (external browser login)
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncStepAuth:
+    """Tests for the external auth step."""
 
     @pytest.mark.asyncio
-    async def test_network_error_shows_cannot_connect(
-        self, mock_flow, valid_user_input
-    ):
-        """Test that network errors show cannot_connect error."""
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                side_effect=aiohttp.ClientError("Connection failed"),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_user(user_input=valid_user_input)
+    async def test_auth_step_opens_external_url(self, mock_flow):
+        """Test that the auth step opens the external login URL."""
+        mock_flow._region = "fra"
+        result = await mock_flow.async_step_auth(user_input=None)
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "user"
-        assert result["errors"] == {"base": "cannot_connect"}
+        assert result["type"] == "external"
+        assert result["step_id"] == "auth"
+        assert "navimow-h5-fra-willand.com" in result["url"]
+        assert "redirect_uri" in result["url"]
+        assert "flow_id" in result["url"]
 
     @pytest.mark.asyncio
-    async def test_timeout_error_shows_cannot_connect(
-        self, mock_flow, valid_user_input
-    ):
-        """Test that timeout errors show cannot_connect error."""
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                side_effect=TimeoutError(),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_user(user_input=valid_user_input)
+    async def test_auth_step_url_contains_redirect(self, mock_flow):
+        """Test that the login URL includes the HA redirect URI."""
+        mock_flow._region = "fra"
+        result = await mock_flow.async_step_auth(user_input=None)
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "user"
-        assert result["errors"] == {"base": "cannot_connect"}
+        url = result["url"]
+        assert "homeassistant.local" in url
+        assert "redirect_uri=" in url
+
+
+# ---------------------------------------------------------------------------
+# Tests: async_step_auth_complete (token callback)
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncStepAuthComplete:
+    """Tests for the auth completion step."""
 
     @pytest.mark.asyncio
-    async def test_no_devices_shows_error(
-        self, mock_flow, valid_user_input, mock_login_success
-    ):
-        """Test that no devices found shows an error."""
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                return_value=mock_login_success,
-            ),
-            patch.object(
-                mock_flow,
-                "_fetch_devices",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_user(user_input=valid_user_input)
+    async def test_successful_auth_with_devices(self, mock_flow):
+        """Test successful auth callback proceeds to device selection."""
+        mock_flow._region = "fra"
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "user"
-        assert result["errors"] == {"base": "no_devices"}
+        with patch.object(
+            mock_flow,
+            "_fetch_devices",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "device_sn": "NVM1234567890",
+                    "name": "Front Yard Mower",
+                    "model": "Navimow i105",
+                    "online": True,
+                }
+            ],
+        ), patch(
+            "custom_components.navimow.config_flow.async_get_clientsession"
+        ) as mock_get_session:
+            mock_get_session.return_value = AsyncMock()
+            result = await mock_flow.async_step_auth_complete(
+                user_input={
+                    "access_token": "test_access_token_123",
+                    "refresh_token": "test_refresh_token_456",
+                    "expires_in": 7200,
+                }
+            )
+
+        assert result["type"] == "external_done"
+        assert result["next_step_id"] == "devices"
+        assert mock_flow._access_token == "test_access_token_123"
+        assert mock_flow._refresh_token == "test_refresh_token_456"
 
     @pytest.mark.asyncio
-    async def test_device_fetch_network_error(
-        self, mock_flow, valid_user_input, mock_login_success
-    ):
-        """Test that network error during device fetch shows cannot_connect."""
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                return_value=mock_login_success,
-            ),
-            patch.object(
-                mock_flow,
-                "_fetch_devices",
-                new_callable=AsyncMock,
-                side_effect=aiohttp.ClientError("Network error"),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_user(user_input=valid_user_input)
+    async def test_auth_with_empty_token_aborts(self, mock_flow):
+        """Test that empty access token aborts the flow."""
+        mock_flow._region = "fra"
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "user"
-        assert result["errors"] == {"base": "cannot_connect"}
+        result = await mock_flow.async_step_auth_complete(
+            user_input={
+                "access_token": "",
+                "refresh_token": "",
+                "expires_in": 3600,
+            }
+        )
+
+        assert result["type"] == "abort"
+        assert result["reason"] == "invalid_auth"
+
+    @pytest.mark.asyncio
+    async def test_auth_with_no_devices_aborts(self, mock_flow):
+        """Test that no devices found aborts the flow."""
+        mock_flow._region = "fra"
+
+        with patch.object(
+            mock_flow,
+            "_fetch_devices",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "custom_components.navimow.config_flow.async_get_clientsession"
+        ) as mock_get_session:
+            mock_get_session.return_value = AsyncMock()
+            result = await mock_flow.async_step_auth_complete(
+                user_input={
+                    "access_token": "valid_token",
+                    "refresh_token": "refresh",
+                    "expires_in": 3600,
+                }
+            )
+
+        assert result["type"] == "abort"
+        assert result["reason"] == "no_devices"
+
+    @pytest.mark.asyncio
+    async def test_auth_with_network_error_aborts(self, mock_flow):
+        """Test that network error during device fetch aborts."""
+        mock_flow._region = "fra"
+
+        with patch.object(
+            mock_flow,
+            "_fetch_devices",
+            new_callable=AsyncMock,
+            side_effect=aiohttp.ClientError("Connection failed"),
+        ), patch(
+            "custom_components.navimow.config_flow.async_get_clientsession"
+        ) as mock_get_session:
+            mock_get_session.return_value = AsyncMock()
+            result = await mock_flow.async_step_auth_complete(
+                user_input={
+                    "access_token": "valid_token",
+                    "refresh_token": "refresh",
+                    "expires_in": 3600,
+                }
+            )
+
+        assert result["type"] == "abort"
+        assert result["reason"] == "cannot_connect"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +338,6 @@ class TestAsyncStepDevices:
         mock_flow._refresh_token = "refresh_token_456"
         mock_flow._token_expiry = "2024-01-01T12:00:00+00:00"
         mock_flow._region = "fra"
-        mock_flow._username = "user@example.com"
         mock_flow._devices = [
             {
                 "device_sn": "NVM1234567890",
@@ -360,12 +358,11 @@ class TestAsyncStepDevices:
         )
 
         assert result["type"] == "create_entry"
-        assert result["title"] == "Navimow (user@example.com)"
+        assert "Navimow" in result["title"]
         assert result["data"]["access_token"] == "access_token_123"
         assert result["data"]["refresh_token"] == "refresh_token_456"
         assert result["data"]["token_expiry"] == "2024-01-01T12:00:00+00:00"
         assert result["data"]["region"] == "fra"
-        assert result["data"]["username"] == "user@example.com"
         assert result["data"]["devices"] == ["NVM1234567890"]
 
     @pytest.mark.asyncio
@@ -375,7 +372,6 @@ class TestAsyncStepDevices:
         mock_flow._refresh_token = "refresh_token_456"
         mock_flow._token_expiry = "2024-01-01T12:00:00+00:00"
         mock_flow._region = "ore"
-        mock_flow._username = "user@example.com"
         mock_flow._devices = [
             {
                 "device_sn": "NVM1234567890",
@@ -410,25 +406,41 @@ class TestAsyncStepReauth:
 
     @pytest.mark.asyncio
     async def test_reauth_shows_confirm_form(self, mock_flow, mock_hass):
-        """Test that reauth step shows the confirmation form."""
+        """Test that reauth step shows the region confirmation form."""
         mock_entry = MagicMock()
         mock_entry.data = {
-            "username": "user@example.com",
             "region": "fra",
+            "access_token": "old_token",
+            "refresh_token": "old_refresh",
         }
         mock_hass.config_entries.async_get_entry.return_value = mock_entry
 
-        result = await mock_flow.async_step_reauth(entry_data={})
+        result = await mock_flow.async_step_reauth(
+            entry_data={"region": "fra"}
+        )
 
         assert result["type"] == "form"
         assert result["step_id"] == "reauth_confirm"
 
     @pytest.mark.asyncio
-    async def test_reauth_confirm_success(self, mock_flow, mock_hass):
-        """Test successful re-authentication."""
+    async def test_reauth_confirm_opens_browser(self, mock_flow, mock_hass):
+        """Test that confirming reauth opens the browser login."""
+        mock_entry = MagicMock()
+        mock_entry.data = {"region": "fra"}
+        mock_flow._reauth_entry = mock_entry
+        mock_flow._region = "fra"
+
+        result = await mock_flow.async_step_reauth_auth(user_input=None)
+
+        assert result["type"] == "external"
+        assert result["step_id"] == "reauth_auth"
+        assert "navimow-h5-fra-willand.com" in result["url"]
+
+    @pytest.mark.asyncio
+    async def test_reauth_complete_success(self, mock_flow, mock_hass):
+        """Test successful re-authentication updates the entry."""
         mock_entry = MagicMock()
         mock_entry.data = {
-            "username": "user@example.com",
             "region": "fra",
             "access_token": "old_token",
             "refresh_token": "old_refresh",
@@ -436,29 +448,16 @@ class TestAsyncStepReauth:
             "devices": ["NVM1234567890"],
         }
         mock_entry.entry_id = "test_entry_id"
-        mock_hass.config_entries.async_get_entry.return_value = mock_entry
         mock_flow._reauth_entry = mock_entry
+        mock_flow._region = "fra"
 
-        token_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                return_value=("new_access_token", "new_refresh_token", token_expiry),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_reauth_confirm(
-                user_input={
-                    "username": "user@example.com",
-                    "password": "newpassword",
-                    "region": "fra",
-                }
-            )
+        result = await mock_flow.async_step_reauth_complete(
+            user_input={
+                "access_token": "new_access_token",
+                "refresh_token": "new_refresh_token",
+                "expires_in": 7200,
+            }
+        )
 
         assert result["type"] == "abort"
         assert result["reason"] == "reauth_successful"
@@ -466,70 +465,17 @@ class TestAsyncStepReauth:
         mock_hass.config_entries.async_reload.assert_called_once_with("test_entry_id")
 
     @pytest.mark.asyncio
-    async def test_reauth_confirm_invalid_credentials(self, mock_flow, mock_hass):
-        """Test re-authentication with invalid credentials."""
-        mock_entry = MagicMock()
-        mock_entry.data = {
-            "username": "user@example.com",
-            "region": "fra",
-        }
-        mock_flow._reauth_entry = mock_entry
+    async def test_reauth_complete_no_token_aborts(self, mock_flow, mock_hass):
+        """Test re-authentication without token aborts."""
+        mock_flow._reauth_entry = MagicMock()
+        mock_flow._region = "fra"
 
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                side_effect=NavimowAuthError("Invalid credentials"),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_reauth_confirm(
-                user_input={
-                    "username": "user@example.com",
-                    "password": "wrongpassword",
-                    "region": "fra",
-                }
-            )
+        result = await mock_flow.async_step_reauth_complete(
+            user_input={"access_token": "", "refresh_token": ""}
+        )
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "reauth_confirm"
-        assert result["errors"] == {"base": "invalid_auth"}
-
-    @pytest.mark.asyncio
-    async def test_reauth_confirm_network_error(self, mock_flow, mock_hass):
-        """Test re-authentication with network error."""
-        mock_entry = MagicMock()
-        mock_entry.data = {
-            "username": "user@example.com",
-            "region": "fra",
-        }
-        mock_flow._reauth_entry = mock_entry
-
-        with (
-            patch(
-                "custom_components.navimow.config_flow.async_get_clientsession"
-            ) as mock_get_session,
-            patch(
-                "custom_components.navimow.config_flow.NavimowAuth.async_login",
-                new_callable=AsyncMock,
-                side_effect=aiohttp.ClientError("Connection failed"),
-            ),
-        ):
-            mock_get_session.return_value = AsyncMock()
-            result = await mock_flow.async_step_reauth_confirm(
-                user_input={
-                    "username": "user@example.com",
-                    "password": "password",
-                    "region": "fra",
-                }
-            )
-
-        assert result["type"] == "form"
-        assert result["step_id"] == "reauth_confirm"
-        assert result["errors"] == {"base": "cannot_connect"}
+        assert result["type"] == "abort"
+        assert result["reason"] == "invalid_auth"
 
 
 # ---------------------------------------------------------------------------
@@ -542,20 +488,24 @@ class TestFetchDevices:
 
     @pytest.mark.asyncio
     async def test_fetch_devices_success(self, mock_flow):
-        """Test successful device fetching."""
+        """Test successful device fetching via openapi/smarthome/authList."""
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(
             return_value={
-                "code": 0,
-                "data": [
-                    {
-                        "sn": "NVM1234567890",
-                        "name": "Front Yard Mower",
-                        "model": "Navimow i105",
-                        "online": True,
-                    },
-                ],
+                "code": 1,
+                "data": {
+                    "payload": {
+                        "devices": [
+                            {
+                                "id": "NVM1234567890",
+                                "name": "Front Yard Mower",
+                                "model": "Navimow i105",
+                                "isOnline": True,
+                            },
+                        ]
+                    }
+                },
             }
         )
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
@@ -564,18 +514,9 @@ class TestFetchDevices:
         mock_session = AsyncMock()
         mock_session.get = MagicMock(return_value=mock_response)
 
-        with patch(
-            "custom_components.navimow.encryption.NbEncryption"
-        ) as mock_encryption:
-            mock_encryption.generate_nonce.return_value = "test_nonce"
-            mock_encryption.sign_params.return_value = "test_signature"
-            mock_encryption.build_signed_headers.return_value = {
-                "Authorization": "Bearer token",
-            }
-
-            devices = await mock_flow._fetch_devices(
-                mock_session, "fra", "access_token_123"
-            )
+        devices = await mock_flow._fetch_devices(
+            mock_session, "fra", "access_token_123"
+        )
 
         assert len(devices) == 1
         assert devices[0]["device_sn"] == "NVM1234567890"
@@ -585,11 +526,14 @@ class TestFetchDevices:
 
     @pytest.mark.asyncio
     async def test_fetch_devices_empty_response(self, mock_flow):
-        """Test device fetching with empty response."""
+        """Test device fetching with empty device list."""
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(
-            return_value={"code": 0, "data": []}
+            return_value={
+                "code": 1,
+                "data": {"payload": {"devices": []}},
+            }
         )
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=False)
@@ -597,16 +541,9 @@ class TestFetchDevices:
         mock_session = AsyncMock()
         mock_session.get = MagicMock(return_value=mock_response)
 
-        with patch(
-            "custom_components.navimow.encryption.NbEncryption"
-        ) as mock_encryption:
-            mock_encryption.generate_nonce.return_value = "test_nonce"
-            mock_encryption.sign_params.return_value = "test_signature"
-            mock_encryption.build_signed_headers.return_value = {}
-
-            devices = await mock_flow._fetch_devices(
-                mock_session, "fra", "access_token_123"
-            )
+        devices = await mock_flow._fetch_devices(
+            mock_session, "fra", "access_token_123"
+        )
 
         assert devices == []
 
@@ -621,39 +558,20 @@ class TestFetchDevices:
         mock_session = AsyncMock()
         mock_session.get = MagicMock(return_value=mock_response)
 
-        with patch(
-            "custom_components.navimow.encryption.NbEncryption"
-        ) as mock_encryption:
-            mock_encryption.generate_nonce.return_value = "test_nonce"
-            mock_encryption.sign_params.return_value = "test_signature"
-            mock_encryption.build_signed_headers.return_value = {}
-
-            with pytest.raises(aiohttp.ClientError):
-                await mock_flow._fetch_devices(
-                    mock_session, "fra", "access_token_123"
-                )
+        with pytest.raises(aiohttp.ClientError):
+            await mock_flow._fetch_devices(
+                mock_session, "fra", "access_token_123"
+            )
 
     @pytest.mark.asyncio
-    async def test_fetch_devices_filters_invalid_entries(self, mock_flow):
-        """Test that devices without serial numbers are filtered out."""
+    async def test_fetch_devices_uses_correct_url(self, mock_flow):
+        """Test that _fetch_devices calls the correct API endpoint."""
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(
             return_value={
-                "code": 0,
-                "data": [
-                    {
-                        "sn": "NVM1234567890",
-                        "name": "Valid Mower",
-                        "model": "i105",
-                        "online": True,
-                    },
-                    {
-                        "name": "Invalid Mower",
-                        "model": "i108",
-                        "online": False,
-                    },
-                ],
+                "code": 1,
+                "data": {"payload": {"devices": []}},
             }
         )
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
@@ -662,19 +580,99 @@ class TestFetchDevices:
         mock_session = AsyncMock()
         mock_session.get = MagicMock(return_value=mock_response)
 
-        with patch(
-            "custom_components.navimow.encryption.NbEncryption"
-        ) as mock_encryption:
-            mock_encryption.generate_nonce.return_value = "test_nonce"
-            mock_encryption.sign_params.return_value = "test_signature"
-            mock_encryption.build_signed_headers.return_value = {}
+        await mock_flow._fetch_devices(mock_session, "fra", "token123")
 
-            devices = await mock_flow._fetch_devices(
-                mock_session, "fra", "access_token_123"
-            )
+        # Verify the correct URL was called
+        call_args = mock_session.get.call_args
+        url = call_args[0][0]
+        assert url == "https://navimow-fra.ninebot.com/openapi/smarthome/authList"
 
-        assert len(devices) == 1
-        assert devices[0]["device_sn"] == "NVM1234567890"
+    @pytest.mark.asyncio
+    async def test_fetch_devices_uses_bearer_auth(self, mock_flow):
+        """Test that _fetch_devices uses Bearer token auth."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(
+            return_value={
+                "code": 1,
+                "data": {"payload": {"devices": []}},
+            }
+        )
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=mock_response)
+
+        await mock_flow._fetch_devices(mock_session, "fra", "my_token_abc")
+
+        # Verify Bearer auth header
+        call_args = mock_session.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer my_token_abc"
+        assert "requestId" in headers
+
+    @pytest.mark.asyncio
+    async def test_fetch_devices_api_error_code(self, mock_flow):
+        """Test that non-success API code returns empty list."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(
+            return_value={
+                "code": 0,
+                "desc": "unauthorized",
+            }
+        )
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=mock_response)
+
+        devices = await mock_flow._fetch_devices(
+            mock_session, "fra", "invalid_token"
+        )
+
+        assert devices == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_login_url
+# ---------------------------------------------------------------------------
+
+
+class TestBuildLoginUrl:
+    """Tests for the _build_login_url helper."""
+
+    def test_login_url_contains_region_base(self, mock_flow):
+        """Test that login URL uses the correct regional base."""
+        mock_flow._region = "fra"
+        url = mock_flow._build_login_url()
+        assert "navimow-h5-fra-willand.com/smartHome/login" in url
+
+    def test_login_url_contains_redirect_uri(self, mock_flow):
+        """Test that login URL includes redirect_uri parameter."""
+        mock_flow._region = "fra"
+        url = mock_flow._build_login_url()
+        assert "redirect_uri=" in url
+        assert "auth%2Fexternal%2Fcallback" in url
+
+    def test_login_url_contains_flow_id(self, mock_flow):
+        """Test that login URL includes flow_id parameter."""
+        mock_flow._region = "fra"
+        url = mock_flow._build_login_url()
+        assert "flow_id=" in url
+
+    def test_login_url_different_regions(self, mock_flow):
+        """Test that different regions produce different URLs."""
+        mock_flow._region = "ore"
+        url_ore = mock_flow._build_login_url()
+        mock_flow._region = "sg"
+        url_sg = mock_flow._build_login_url()
+
+        assert "ore" in url_ore
+        assert "sg" in url_sg
+        assert url_ore != url_sg
 
 
 # ---------------------------------------------------------------------------
@@ -696,12 +694,21 @@ class TestConfigFlowConstants:
         """Test that the domain is correctly set."""
         assert DOMAIN == "navimow"
 
-    def test_user_schema_has_required_fields(self):
-        """Test that the user schema has all required fields."""
-        schema_keys = [str(k) for k in STEP_USER_DATA_SCHEMA.schema]
-        assert "username" in schema_keys
-        assert "password" in schema_keys
-        assert "region" in schema_keys
+    def test_oauth_login_urls_cover_all_regions(self):
+        """Test that all regions have OAuth login URLs."""
+        from custom_components.navimow.const import REGIONS
+
+        for region in REGIONS:
+            assert region in OAUTH_LOGIN_URLS
+            assert "smartHome/login" in OAUTH_LOGIN_URLS[region]
+
+    def test_api_base_urls_cover_all_regions(self):
+        """Test that all regions have API base URLs."""
+        from custom_components.navimow.const import REGIONS
+
+        for region in REGIONS:
+            assert region in API_BASE_URLS
+            assert "ninebot.com" in API_BASE_URLS[region]
 
     def test_config_flow_version(self):
         """Test that the config flow version is set."""

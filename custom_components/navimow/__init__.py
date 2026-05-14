@@ -13,7 +13,11 @@ from .api_client import NavimowApiClient
 from .auth import NavimowAuth
 from .const import DOMAIN, PLATFORMS
 from .coordinator import NavimowCoordinator
-from .security import NavimowLogFilter
+
+try:
+    from .security import NavimowLogFilter
+except ImportError:
+    NavimowLogFilter = None  # type: ignore[assignment, misc]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,10 +30,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     hass.data.setdefault(DOMAIN, {})
 
-    # Set up log filter for credential redaction
-    log_filter = NavimowLogFilter()
-    integration_logger = logging.getLogger("custom_components.navimow")
-    integration_logger.addFilter(log_filter)
+    # Set up log filter for credential redaction (if available)
+    log_filter = NavimowLogFilter() if NavimowLogFilter else None
+    if log_filter:
+        integration_logger = logging.getLogger("custom_components.navimow")
+        integration_logger.addFilter(log_filter)
 
     session = async_get_clientsession(hass)
 
@@ -45,16 +50,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register known sensitive values with the log filter
     access_token = entry.data["access_token"]
     refresh_token = entry.data["refresh_token"]
-    log_filter.add_sensitive_value(access_token)
-    log_filter.add_sensitive_value(refresh_token)
+    if log_filter:
+        log_filter.add_sensitive_value(access_token)
+        log_filter.add_sensitive_value(refresh_token)
 
     async def _on_token_refresh(
         access_token: str, refresh_token: str, expiry: datetime
     ) -> None:
         """Persist refreshed tokens to the config entry."""
         # Update log filter with new token values
-        log_filter.add_sensitive_value(access_token)
-        log_filter.add_sensitive_value(refresh_token)
+        if log_filter:
+            log_filter.add_sensitive_value(access_token)
+            log_filter.add_sensitive_value(refresh_token)
 
         hass.config_entries.async_update_entry(
             entry,
@@ -99,8 +106,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinators": coordinators,
         "api_client": api_client,
         "auth": auth,
-        "log_filter": log_filter,
     }
+    if log_filter:
+        hass.data[DOMAIN][entry.entry_id]["log_filter"] = log_filter
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

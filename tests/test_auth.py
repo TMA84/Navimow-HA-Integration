@@ -1,8 +1,7 @@
-"""Tests for the Navimow authentication module."""
+"""Tests for the Navimow authentication module (OAuth2 Bearer token)."""
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from datetime import datetime, timedelta, timezone
 from types import ModuleType
@@ -135,6 +134,36 @@ class TestAsyncGetAccessToken:
         assert token == "new_access_token"
         token_refresh_callback.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_refreshes_when_about_to_expire(self, mock_session, token_refresh_callback):
+        """Test that a token about to expire (within 60s) triggers refresh."""
+        # Token expires in 30 seconds (within the 60s buffer)
+        near_expiry = datetime.now(timezone.utc) + timedelta(seconds=30)
+
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(return_value={
+            "access_token": "refreshed_token",
+            "refresh_token": "refreshed_refresh",
+            "expires_in": 3600,
+        })
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        mock_session.post = MagicMock(return_value=response)
+
+        auth = NavimowAuth(
+            session=mock_session,
+            region="fra",
+            access_token="about_to_expire_token",
+            refresh_token="refresh",
+            token_expiry=near_expiry,
+            on_token_refresh=token_refresh_callback,
+        )
+
+        token = await auth.async_get_access_token()
+        assert token == "refreshed_token"
+        token_refresh_callback.assert_called_once()
+
 
 class TestAsyncRefreshToken:
     """Tests for async_refresh_token."""
@@ -245,118 +274,54 @@ class TestAsyncRefreshToken:
         assert refresh == "keep_this_refresh"
 
 
-class TestSignRequest:
-    """Tests for sign_request."""
+class TestGetAuthHeaders:
+    """Tests for get_auth_headers (Bearer token + requestId)."""
 
-    def test_sign_request_returns_headers(self, auth_instance):
-        """Test that sign_request returns proper headers."""
-        params = {"device_sn": "NVM123", "action": "get"}
-        headers = auth_instance.sign_request(params)
+    def test_get_auth_headers_contains_bearer(self, auth_instance):
+        """Test that get_auth_headers returns Bearer token header."""
+        headers = auth_instance.get_auth_headers()
 
         assert "Authorization" in headers
-        assert headers["Authorization"].startswith("Bearer ")
-        assert headers["appfrom"] == "navimow"
-        assert headers["appbrand"] == "Android"
-        assert "x-nonce" in headers
-        assert "x-timestamp" in headers
-        assert "x-signature" in headers
+        assert headers["Authorization"] == "Bearer test_access_token"
+
+    def test_get_auth_headers_contains_request_id(self, auth_instance):
+        """Test that get_auth_headers returns a requestId header."""
+        headers = auth_instance.get_auth_headers()
+
+        assert "requestId" in headers
+        # requestId should be a UUID string
+        assert len(headers["requestId"]) > 0
+
+    def test_get_auth_headers_unique_request_ids(self, auth_instance):
+        """Test that each call generates a unique requestId."""
+        headers1 = auth_instance.get_auth_headers()
+        headers2 = auth_instance.get_auth_headers()
+
+        assert headers1["requestId"] != headers2["requestId"]
 
 
-class TestAsyncLogin:
-    """Tests for async_login static method."""
+class TestSignRequest:
+    """Tests for sign_request (backward-compatible wrapper)."""
 
-    @pytest.mark.asyncio
-    async def test_successful_login(self, mock_session):
-        """Test successful login returns tokens."""
-        response = AsyncMock()
-        response.status = 200
-        response.json = AsyncMock(return_value={
-            "access_token": "login_access_token",
-            "refresh_token": "login_refresh_token",
-            "expires_in": 7200,
-        })
-        response.__aenter__ = AsyncMock(return_value=response)
-        response.__aexit__ = AsyncMock(return_value=False)
-        mock_session.post = MagicMock(return_value=response)
+    def test_sign_request_returns_bearer_headers(self, auth_instance):
+        """Test that sign_request returns Bearer auth headers."""
+        headers = auth_instance.sign_request({"some": "params"})
 
-        access, refresh, expiry = await NavimowAuth.async_login(
-            session=mock_session,
-            region="fra",
-            username="user@example.com",
-            password="password123",
-        )
+        assert "Authorization" in headers
+        assert headers["Authorization"] == "Bearer test_access_token"
+        assert "requestId" in headers
 
-        assert access == "login_access_token"
-        assert refresh == "login_refresh_token"
-        assert expiry > datetime.now(timezone.utc)
+    def test_sign_request_ignores_params(self, auth_instance):
+        """Test that sign_request works regardless of params passed."""
+        headers_with_params = auth_instance.sign_request({"key": "value"})
+        headers_without_params = auth_instance.sign_request(None)
 
-    @pytest.mark.asyncio
-    async def test_login_posts_to_correct_url(self, mock_session):
-        """Test that login posts to the correct passport URL."""
-        response = AsyncMock()
-        response.status = 200
-        response.json = AsyncMock(return_value={
-            "access_token": "token",
-            "refresh_token": "refresh",
-            "expires_in": 3600,
-        })
-        response.__aenter__ = AsyncMock(return_value=response)
-        response.__aexit__ = AsyncMock(return_value=False)
-        mock_session.post = MagicMock(return_value=response)
-
-        await NavimowAuth.async_login(
-            session=mock_session,
-            region="ore",
-            username="user@example.com",
-            password="pass",
-        )
-
-        mock_session.post.assert_called_once()
-        call_args = mock_session.post.call_args
-        assert call_args[0][0] == "https://api-passport-ore.ninebot.com/oauth/access_token"
-        assert call_args[1]["data"]["grant_type"] == "password"
-        assert call_args[1]["data"]["username"] == "user@example.com"
-        assert call_args[1]["data"]["password"] == "pass"
-
-    @pytest.mark.asyncio
-    async def test_login_failure_raises_error(self, mock_session):
-        """Test that a failed login raises NavimowAuthError."""
-        response = AsyncMock()
-        response.status = 403
-        response.__aenter__ = AsyncMock(return_value=response)
-        response.__aexit__ = AsyncMock(return_value=False)
-        mock_session.post = MagicMock(return_value=response)
-
-        with pytest.raises(NavimowAuthError, match="Login failed with status 403"):
-            await NavimowAuth.async_login(
-                session=mock_session,
-                region="fra",
-                username="user@example.com",
-                password="wrong_password",
-            )
-
-    @pytest.mark.asyncio
-    async def test_login_missing_access_token_raises_error(self, mock_session):
-        """Test that a response without access_token raises error."""
-        response = AsyncMock()
-        response.status = 200
-        response.json = AsyncMock(return_value={"error": "invalid_credentials"})
-        response.__aenter__ = AsyncMock(return_value=response)
-        response.__aexit__ = AsyncMock(return_value=False)
-        mock_session.post = MagicMock(return_value=response)
-
-        with pytest.raises(NavimowAuthError, match="Login response missing access_token"):
-            await NavimowAuth.async_login(
-                session=mock_session,
-                region="fra",
-                username="user@example.com",
-                password="password",
-            )
+        # Both should have the same auth structure
+        assert headers_with_params["Authorization"] == headers_without_params["Authorization"]
 
 
 # Feature: navimow-home-assistant, Property 3: Token Refresh on Expiry
 
-import asyncio
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
@@ -368,8 +333,9 @@ class TestTokenRefreshOnExpiryProperty:
 
     Property 3: Token Refresh on Expiry
     For any API request made when the current access token's expiry time is in
-    the past, the auth layer SHALL attempt a token refresh before executing the
-    request, and the request SHALL be sent with the new token (not the expired one).
+    the past (or within 60s of expiry), the auth layer SHALL attempt a token
+    refresh before executing the request, and the request SHALL be sent with
+    the new token (not the expired one).
     """
 
     @settings(max_examples=100)
@@ -422,13 +388,13 @@ class TestTokenRefreshOnExpiryProperty:
 
     @settings(max_examples=100)
     @given(
-        seconds_in_future=st.integers(min_value=1, max_value=365 * 24 * 3600),
+        seconds_in_future=st.integers(min_value=61, max_value=365 * 24 * 3600),
     )
     @pytest.mark.asyncio
     async def test_valid_token_does_not_trigger_refresh(self, seconds_in_future: int):
-        """For any token expiry time in the future, calling async_get_access_token
-        returns the current token without triggering a refresh."""
-        # Generate an expiry time that is in the future
+        """For any token expiry time more than 60s in the future, calling
+        async_get_access_token returns the current token without refresh."""
+        # Generate an expiry time that is well in the future (beyond 60s buffer)
         valid_expiry = datetime.now(timezone.utc) + timedelta(seconds=seconds_in_future)
 
         mock_session = AsyncMock()

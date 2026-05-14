@@ -25,6 +25,9 @@ _ha_helpers = ModuleType("homeassistant.helpers")
 _ha_helpers_aiohttp = ModuleType("homeassistant.helpers.aiohttp_client")
 _ha_helpers_aiohttp.async_get_clientsession = MagicMock()
 
+_ha_helpers_network = ModuleType("homeassistant.helpers.network")
+_ha_helpers_network.get_url = MagicMock(return_value="http://homeassistant.local:8123")
+
 _ha_helpers_device_registry = ModuleType("homeassistant.helpers.device_registry")
 _ha_helpers_device_registry.DeviceInfo = dict
 
@@ -79,6 +82,7 @@ sys.modules.setdefault("homeassistant.config_entries", _ha_mock.config_entries)
 sys.modules.setdefault("homeassistant.core", _ha_mock.core)
 sys.modules.setdefault("homeassistant.helpers", _ha_helpers)
 sys.modules.setdefault("homeassistant.helpers.aiohttp_client", _ha_helpers_aiohttp)
+sys.modules.setdefault("homeassistant.helpers.network", _ha_helpers_network)
 sys.modules.setdefault("homeassistant.helpers.device_registry", _ha_helpers_device_registry)
 sys.modules.setdefault("homeassistant.helpers.entity", _ha_helpers_entity)
 sys.modules.setdefault("homeassistant.helpers.entity_platform", _ha_helpers_entity_platform)
@@ -383,14 +387,16 @@ def mock_auth() -> AsyncMock:
             datetime.now(tz=timezone.utc) + timedelta(hours=1),
         )
     )
+    auth.get_auth_headers = MagicMock(
+        return_value={
+            "Authorization": "Bearer mock_access_token_abc123",
+            "requestId": "mock-request-id-uuid",
+        }
+    )
     auth.sign_request = MagicMock(
         return_value={
             "Authorization": "Bearer mock_access_token_abc123",
-            "appfrom": "navimow",
-            "appbrand": "Android",
-            "x-nonce": "mock_nonce",
-            "x-timestamp": "1700000000",
-            "x-signature": "mock_signature",
+            "requestId": "mock-request-id-uuid",
         }
     )
 
