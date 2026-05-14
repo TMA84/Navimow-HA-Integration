@@ -1,0 +1,41 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Navimow",
+        "description": "Enter your Segway/Ninebot account credentials",
+        "data": {
+          "username": "Email or Phone",
+          "password": "Password",
+          "region": "Server Region"
+        }
+      },
+      "devices": {
+        "title": "Select Devices",
+        "description": "Select the Navimow mowers to add",
+        "data": {
+          "devices": "Devices"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate",
+        "description": "Your session has expired. Please re-enter your credentials.",
+        "data": {
+          "username": "Email or Phone",
+          "password": "Password",
+          "region": "Server Region"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid credentials",
+      "cannot_connect": "Unable to connect to the Navimow service",
+      "no_devices": "No Navimow devices found on this account",
+      "unknown": "An unexpected error occurred"
+    },
+    "abort": {
+      "reauth_successful": "Re-authentication successful",
+      "already_configured": "This account is already configured"
+    }
+  }
+}
